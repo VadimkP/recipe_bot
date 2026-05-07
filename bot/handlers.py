@@ -17,6 +17,75 @@ WAITING_RECIPE_SELECTION = 4
 WAITING_CART_SELECTION = 5
 WAITING_DELETE_SELECTION = 6
 
+import re
+
+# Единицы измерения — если первое или второе слово совпадает, оно часть количества
+_UNITS = {
+    "г", "кг", "мл", "л", "шт", "шт.",
+    "стл", "ст.л", "ч.л", "чл",          # ложки без точки и с
+    "ст", "стак", "стакан",
+    "щепотк", "щепотка", "щепот",
+    "пучок", "пучка", "пуч",
+    "зубч", "зубчик", "зубчика", "зубчиков",
+    "долька", "долк", "долек",
+    "кусок", "куска", "кус",
+    "пачка", "пачки", "пач",
+    "банка", "банки", "бан",
+    "горсть", "горсти", "горст",
+    "ломтик", "ломтика", "ломт",
+    "веточка", "веточки", "ветк",
+    "литр", "литра",
+}
+
+
+def _normalize_unit(s: str) -> str:
+    """Убираем точки и приводим к нижнему регистру для сравнения с _UNITS."""
+    return s.lower().replace(".", "")
+
+
+def _parse_ingredient_line(line: str) -> tuple[str, str]:
+    """
+    Умный парсинг строки ингредиента.
+    Примеры:
+      '500г Куриное филе'    -> ('500г', 'Куриное филе')
+      '2 шт Яйцо'           -> ('2 шт', 'Яйцо')
+      '1 ст.л. Масло'       -> ('1 ст.л.', 'Масло')
+      'по вкусу Соль'       -> ('по вкусу', 'Соль')
+      'Соль'                -> ('—', 'Соль')
+    """
+    parts = line.split()
+    if not parts:
+        return "—", line
+
+    # Если первое слово начинается с цифры
+    if re.match(r'^\d', parts[0]):
+        if len(parts) == 1:
+            return parts[0], "—"
+        # Проверяем второе слово — единица измерения?
+        if len(parts) >= 3 and _normalize_unit(parts[1]) in _UNITS:
+            amount = " ".join(parts[:2])
+            ing_name = " ".join(parts[2:])
+        else:
+            amount = parts[0]
+            ing_name = " ".join(parts[1:])
+        return amount, ing_name
+
+    # 'по вкусу Соль' / 'на глаз Сахар'
+    if parts[0].lower() in {"по", "на"} and len(parts) >= 3:
+        amount = " ".join(parts[:2])
+        ing_name = " ".join(parts[2:])
+        return amount, ing_name
+
+    # Единица без числа: 'щепотка Соль'
+    if _normalize_unit(parts[0]) in _UNITS and len(parts) >= 2:
+        amount = parts[0]
+        ing_name = " ".join(parts[1:])
+        return amount, ing_name
+
+    # Не смогли распознать количество — всё считаем названием
+    return "—", line
+
+
 INGREDIENT_HELP = (
     "Введи ингредиенты *каждый с новой строки* в формате:\n"
     "`Количество Название`\n\n"
@@ -103,11 +172,7 @@ async def add_dish_ingredients(update: Update, context: ContextTypes.DEFAULT_TYP
 
     ingredients = []
     for line in lines:
-        parts = line.split(None, 1)
-        if len(parts) == 2:
-            amount, ing_name = parts[0], parts[1]
-        else:
-            amount, ing_name = "—", parts[0]
+        amount, ing_name = _parse_ingredient_line(line)
         category = classify_ingredient(ing_name)
         ingredients.append({"name": ing_name, "amount": amount, "category": category})
 
