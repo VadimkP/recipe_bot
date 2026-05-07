@@ -70,46 +70,54 @@ def _extract_amount_tokens(parts: list[str]) -> tuple[str, str]:
 def _parse_ingredient_line(line: str) -> tuple[str, str]:
     """
     Поддерживает форматы:
-      'Лук – 2 шт.'            -> ('2 шт.', 'Лук')
-      'Лук - 2 шт'             -> ('2 шт', 'Лук')
-      'Томатная паста – 4 ст.л' -> ('4 ст.л', 'Томатная паста')
-      '500г Куриное филе'       -> ('500г', 'Куриное филе')
-      '2 шт Яйцо'              -> ('2 шт', 'Яйцо')
-      '1 ст.л. Масло'          -> ('1 ст.л.', 'Масло')
-      'по вкусу Соль'          -> ('по вкусу', 'Соль')
-      'Соль'                   -> ('—', 'Соль')
+      'Лук – 2 шт.'         -> ('2 шт.', 'Лук')
+      'Тортилья 6 шт'       -> ('6 шт', 'Тортилья')
+      '500г Куриное филе'   -> ('500г', 'Куриное филе')
+      '2 шт Яйцо'           -> ('2 шт', 'Яйцо')
+      'по вкусу Соль'       -> ('по вкусу', 'Соль')
+      'Соль'                -> ('', 'Соль')
     """
     line = line.strip()
     if not line:
-        return "—", ""
+        return "", ""
 
-    # Формат "Название – количество единица" (через тире, дефис, —, -, –)
-    # Разбиваем по первому тире/тире-разделителю
-    sep_match = re.split(r'\s*[–—-]\s*', line, maxsplit=1)
+    # ── Формат 1: "Название – количество единица" (тире-разделитель) ──
+    sep_match = re.split(r'\s*[–—]\s*', line, maxsplit=1)
     if len(sep_match) == 2:
         left, right = sep_match[0].strip(), sep_match[1].strip()
         right_parts = right.split()
-        # Правая часть должна начинаться с числа или единицы
         if right_parts and _is_amount_token(right_parts[0]):
             amount, _ = _extract_amount_tokens(right_parts)
             return amount, left
 
-    # Формат "количество [единица] Название"
     parts = line.split()
     if not parts:
-        return "—", line
+        return "", line
 
-    # "по вкусу ...", "на глаз ..."
+    # ── Формат 2: "по вкусу / на глаз Название" ──
     if parts[0].lower() in {"по", "на"} and len(parts) >= 2:
         amount = " ".join(parts[:2])
-        ing_name = " ".join(parts[2:]) if len(parts) > 2 else "—"
+        ing_name = " ".join(parts[2:]) if len(parts) > 2 else ""
         return amount, ing_name
 
+    # ── Формат 3: "количество [единица] Название" — число первым ──
     if _is_amount_token(parts[0]):
         return _extract_amount_tokens(parts)
 
-    # Ничего не распознали — всё название
-    return "—", line
+    # ── Формат 4: "Название количество [единица]" — число в конце ──
+    # Ищем с конца: берём токены пока они похожи на количество (макс 2)
+    i = len(parts) - 1
+    tail = 0
+    while i >= 0 and tail < 2 and _is_amount_token(parts[i]):
+        tail += 1
+        i -= 1
+    if tail > 0 and i >= 0:
+        ing_name = " ".join(parts[:i + 1])
+        amount = " ".join(parts[i + 1:])
+        return amount, ing_name
+
+    # Ничего не распознали — всё название, количество пустое
+    return "", line
 
 
 INGREDIENT_HELP = (
@@ -208,7 +216,11 @@ async def add_dish_ingredients(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data["ingredients"] = ingredients
 
     # Show parsed result
-    preview_lines = [f"  • {i['amount']} {i['name']} _({i['category']})_" for i in ingredients]
+    preview_lines = []
+    for i in ingredients:
+        amt = i['amount']
+        amt_str = f" – {amt}" if amt else ""
+        preview_lines.append(f"  • {i['name']}{amt_str} _({i['category']})_")
     preview = "\n".join(preview_lines)
     await update.message.reply_text(
         f"✅ Ингредиенты распознаны:\n{preview}\n\nТеперь введи *рецепт приготовления* (пошагово или текстом):",
@@ -275,10 +287,11 @@ async def get_recipe_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Блюдо не найдено.")
         return ConversationHandler.END
 
-    ings_text = "\n".join(
-        f"  • {i['amount']} {i['name']}"
-        for i in dish["ingredients"]
-    ) or "  (не указаны)"
+    def _fmt(i):
+        amt_str = f" – {i['amount']}" if i['amount'] else ""
+        return f"  • {i['name']}{amt_str}"
+
+    ings_text = "\n".join(_fmt(i) for i in dish["ingredients"]) or "  (не указаны)"
 
     text = (
         f"🍽 *{dish['name']}*\n\n"
@@ -374,14 +387,18 @@ async def shopping_cart_show(update: Update, context: ContextTypes.DEFAULT_TYPE)
             continue
         lines.append(f"\n*{cat}*")
         for ing in grouped[cat]:
-            lines.append(f"  • {ing['amount']} {ing['name']}")
+            amt = ing['amount']
+            amt_str = f" – {amt}" if amt else ""
+            lines.append(f"  • {ing['name']}{amt_str}")
 
     # Any categories not in our order list
     for cat, ings in grouped.items():
         if cat not in category_order:
             lines.append(f"\n*{cat}*")
             for ing in ings:
-                lines.append(f"  • {ing['amount']} {ing['name']}")
+                amt = ing['amount']
+                amt_str = f" – {amt}" if amt else ""
+                lines.append(f"  • {ing['name']}{amt_str}")
 
     await query.edit_message_text("\n".join(lines), parse_mode="Markdown")
     context.user_data.clear()
